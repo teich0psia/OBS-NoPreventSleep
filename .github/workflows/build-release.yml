@@ -23,10 +23,10 @@ jobs:
 
     steps:
       - name: Check out plugin
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Check out OBS headers
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: obsproject/obs-studio
           ref: ${{ env.OBS_VERSION }}
@@ -53,7 +53,13 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: msbuild build\OBS-Plugin.sln /m /p:Configuration=Release /p:Platform=x64
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) {
+            throw "MSBuild was not found on the runner."
+          }
+          & $msbuild build\OBS-Plugin.sln /m /p:Configuration=Release /p:Platform=x64
 
       - name: Run integration checks
         shell: pwsh
