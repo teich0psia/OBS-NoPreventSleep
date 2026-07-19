@@ -1,0 +1,95 @@
+name: Build and release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  OBS_VERSION: 27.2.4
+  PREMAKE_VERSION: 5.0.0-beta8
+  PREMAKE_SHA256: e64ce2ed8778e0098f63674cca61fe33941b5f0c8d9a4afd651152bdea3758ab
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@v6
+
+      - name: Check out OBS headers
+        uses: actions/checkout@v6
+        with:
+          repository: obsproject/obs-studio
+          ref: ${{ env.OBS_VERSION }}
+          path: obs-studio
+          sparse-checkout: libobs
+
+      - name: Download Premake
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "premake.zip"
+          $url = "https://github.com/premake/premake-core/releases/download/v$env:PREMAKE_VERSION/premake-$env:PREMAKE_VERSION-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:PREMAKE_SHA256) {
+            throw "Premake archive checksum mismatch: $actualHash"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $env:RUNNER_TEMP "premake")
+
+      - name: Generate Visual Studio project
+        shell: pwsh
+        run: |
+          $env:OBS_SOURCE_DIR = Join-Path $env:GITHUB_WORKSPACE "obs-studio"
+          & (Join-Path $env:RUNNER_TEMP "premake\premake5.exe") vs2022
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) {
+            throw "MSBuild was not found on the runner."
+          }
+          & $msbuild build\OBS-Plugin.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Run integration checks
+        shell: pwsh
+        run: bin\tests\integration-check.exe (Resolve-Path "bin\Release\obs-nopreventsleep.dll").Path
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $packageRoot = Join-Path $env:RUNNER_TEMP "package"
+          $pluginDirectory = Join-Path $packageRoot "obs-plugins\64bit"
+          New-Item -ItemType Directory -Force $pluginDirectory | Out-Null
+          Copy-Item -LiteralPath "bin\Release\obs-nopreventsleep.dll" -Destination $pluginDirectory
+          Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath "OBS-NoPreventSleep-windows-x64.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: OBS-NoPreventSleep-windows-x64
+          path: OBS-NoPreventSleep-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME "OBS-NoPreventSleep-windows-x64.zip" --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME "OBS-NoPreventSleep-windows-x64.zip" --generate-notes --verify-tag
+          }
